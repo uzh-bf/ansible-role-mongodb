@@ -1,0 +1,98 @@
+- name: Add the apt key for the mongodb repository
+  apt_key:
+    keyserver: keyserver.ubuntu.com
+    id: 9DA31620334BD75D9DCB49F368818C72E52529D4
+
+- name: Add mongodb repository to sources
+  apt_repository:
+    repo: deb [ arch=amd64 ] https://repo.mongodb.org/apt/ubuntu bionic/mongodb-org/4.0 multiverse
+    state: present
+
+- name: Pin the installed version of mongodb
+  copy:
+    dest: /etc/apt/preferences.d/mongodb-org
+    content: |
+      Package: mongodb-org
+      Pin: version {{ version_mongodb }}
+      Pin-Priority: 1002
+
+- name: Install mongodb
+  apt:
+    name: mongodb-org={{ version_mongodb }}
+    state: present
+
+- name: Ensure that mongodb is running
+  service:
+    name: mongod
+    enabled: yes
+    state: started
+
+- name: Allow all mongodb traffic
+  ufw:
+    rule: allow
+    port: '27017'
+
+- name: Install pymongo with PIP
+  pip:
+    name: pymongo
+    state: "{{ version_pymongo is defined | ternary('present', 'latest') }}"
+    version: '{{ version_pymongo | default(omit) }}'
+
+- name: Add a mongodb admin user
+  mongodb_user:
+    login_user: "{{ existing_superuser is defined | ternary('superuser', omit) }}"
+    login_password: "{{ existing_superuser is defined | ternary(lookup('password', 'credentials/mongodb_superuser.txt'), omit) }}"
+    database: admin
+    name: superuser
+    roles: root
+    password: "{{ lookup('password', 'credentials/mongodb_superuser.txt') }}"
+
+- name: Inject the mongo configuration file
+  template:
+    dest: /etc/mongod.conf
+    src: mongod_conf.j2
+    mode: 644
+  notify: Restart mongodb
+
+- name: Add a mongodb database user
+  mongodb_user:
+    login_user: superuser
+    login_password: "{{ lookup('password', 'credentials/mongodb_superuser.txt') }}"
+    database: '{{ database_name }}'
+    name: '{{ database_name }}'
+    password: "{{ lookup('password', 'credentials/mongodb_dbuser.txt') }}"
+    roles:
+      - { db: '{{ database_name }}', role: readWrite }
+
+- name: Install the AWS CLI
+  apt:
+    name: awscli
+    state: latest
+
+- name: Add a mongodb backup user
+  mongodb_user:
+    login_user: superuser
+    login_password: "{{ lookup('password', 'credentials/mongodb_superuser.txt') }}"
+    database: admin
+    name: backup
+    password: "{{ lookup('password', 'credentials/mongodb_backup.txt') }}"
+    roles: backup
+
+- name: Inject the mongo backup script
+  template:
+    dest: '/home/{{backup_user}}/backup.sh'
+    src: backup_script.j2
+    mode: 0700
+    owner: ubuntu
+    group: ubuntu
+  vars:
+    aws_access_key: "{{ lookup('file', 'credentials/aws_access_key.txt') }}"
+    aws_secret_key: "{{ lookup('file', 'credentials/aws_secret_key.txt') }}"
+    mongo_backup_password: "{{ lookup('password', 'credentials/mongodb_backup.txt') }}"
+
+- name: Add a crontab entry for the mongodb backup script
+  cron:
+    name: 'backup mongodb'
+    minute: '10'
+    user: ubuntu
+    job: '/home/ubuntu/backup.sh > /home/ubuntu/backup.log'
